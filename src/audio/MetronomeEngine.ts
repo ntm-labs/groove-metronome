@@ -10,7 +10,7 @@ interface WebkitWindow extends Window {
 
 const LOOKAHEAD_MS = 25;
 const SCHEDULE_AHEAD_SEC = 0.1;
-const STEPS_PER_BAR = 16; // 4 beats * 4 subdivisions (1, e, &, a)
+const BEATS_PER_BAR = 4;
 
 const LEVEL_GAIN: Record<AccentLevel, number> = {
   mute: 0,
@@ -21,6 +21,7 @@ const LEVEL_GAIN: Record<AccentLevel, number> = {
 
 /**
  * Sample-accurate Web Audio API lookahead scheduler for 4/4 micro-timing grooves.
+ * Supports both 16th-note (4 subdivisions/beat) and Triplet (3 subdivisions/beat) grids.
  * Uses a 25ms JS lookahead timer to schedule audio events 100ms ahead on the
  * hardware AudioContext clock (never triggering clicks directly on JS timers).
  */
@@ -32,9 +33,9 @@ export class MetronomeEngine {
   private isRunning = false;
   private unlocked = false;
 
-  /** Quantized grid timestamp (AudioContext seconds) of the next 16th-note step. */
+  /** Quantized grid timestamp (AudioContext seconds) of the next subdivision step. */
   private nextGridTime = 0;
-  /** Current 16th-note index within the 4/4 bar (0..15). */
+  /** Current subdivision index within the 4/4 bar (0..15 for 16ths, 0..11 for triplets). */
   private currentStep = 0;
 
   /** Queue of scheduled step events for requestAnimationFrame visual sync. */
@@ -46,12 +47,8 @@ export class MetronomeEngine {
     this.config = {
       bpm: initialConfig.bpm,
       feel: initialConfig.feel,
-      subdivisions: [
-        { ...initialConfig.subdivisions[0] },
-        { ...initialConfig.subdivisions[1] },
-        { ...initialConfig.subdivisions[2] },
-        { ...initialConfig.subdivisions[3] },
-      ],
+      gridMode: initialConfig.gridMode,
+      subdivisions: initialConfig.subdivisions.map((slot) => ({ ...slot })),
     };
   }
 
@@ -104,15 +101,20 @@ export class MetronomeEngine {
   }
 
   public updateConfig(next: MetronomeConfig): void {
+    const prevSubsPerBeat = this.getSubdivisionsPerBeat();
+    const nextSubsPerBeat = next.gridMode === 'triplet' ? 3 : 4;
+
+    // If grid mode changed while playing, keep the current beat aligned cleanly
+    if (this.isRunning && prevSubsPerBeat !== nextSubsPerBeat) {
+      const currentBeat = Math.floor(this.currentStep / prevSubsPerBeat);
+      this.currentStep = (currentBeat % BEATS_PER_BAR) * nextSubsPerBeat;
+    }
+
     this.config = {
       bpm: Math.max(30, Math.min(260, next.bpm)),
       feel: Math.max(0, Math.min(100, next.feel)),
-      subdivisions: [
-        { ...next.subdivisions[0] },
-        { ...next.subdivisions[1] },
-        { ...next.subdivisions[2] },
-        { ...next.subdivisions[3] },
-      ],
+      gridMode: next.gridMode,
+      subdivisions: next.subdivisions.map((slot) => ({ ...slot })),
     };
   }
 
@@ -125,8 +127,8 @@ export class MetronomeEngine {
     this.visualQueue = [];
 
     // Give enough initial headroom so even a -30% offset on step 0 schedules cleanly
-    const sixteenthDur = this.getSixteenthDuration();
-    const initialLead = Math.max(0.05, 0.35 * sixteenthDur);
+    const subDur = this.getSubdivisionDuration();
+    const initialLead = Math.max(0.05, 0.35 * subDur);
     this.nextGridTime = ctx.currentTime + initialLead;
 
     // Schedule first batch immediately, then continue on the 25ms lookahead interval
@@ -187,8 +189,12 @@ export class MetronomeEngine {
     }
   }
 
-  private getSixteenthDuration(): number {
-    return 60 / this.config.bpm / 4;
+  private getSubdivisionsPerBeat(): number {
+    return this.config.gridMode === 'triplet' ? 3 : 4;
+  }
+
+  private getSubdivisionDuration(): number {
+    return 60 / this.config.bpm / this.getSubdivisionsPerBeat();
   }
 
   private schedulerTick(): void {
@@ -204,12 +210,18 @@ export class MetronomeEngine {
     const horizon = now + SCHEDULE_AHEAD_SEC;
 
     while (true) {
-      const subIndex = this.currentStep % 4;
+      const subsPerBeat = this.getSubdivisionsPerBeat();
+      const stepsPerBar = BEATS_PER_BAR * subsPerBeat;
+      const safeStep = this.currentStep % stepsPerBar;
+      const subIndex = safeStep % subsPerBeat;
       const slot = this.config.subdivisions[subIndex];
-      const sixteenthDur = this.getSixteenthDuration();
+
+      if (!slot) break;
+
+      const subDur = this.getSubdivisionDuration();
       const effectiveOffsetPercent =
         slot.offsetPercent * (this.config.feel / 100);
-      const offsetSec = (effectiveOffsetPercent / 100) * sixteenthDur;
+      const offsetSec = (effectiveOffsetPercent / 100) * subDur;
       const candidateTime = this.nextGridTime + offsetSec;
 
       // Schedule if either the quantized grid point or the shifted hit falls inside the lookahead window
@@ -218,20 +230,21 @@ export class MetronomeEngine {
       }
 
       const scheduledTime = Math.max(now + 0.002, candidateTime);
-      const beatIndex = Math.floor(this.currentStep / 4);
+      const beatIndex = Math.floor(safeStep / subsPerBeat);
 
       this.scheduleStep(
-        this.currentStep,
+        safeStep,
         beatIndex,
         subIndex,
+        subsPerBeat,
         scheduledTime,
         effectiveOffsetPercent,
         slot.level
       );
 
       // Advance quantized grid cleanly so micro-timing never causes tempo drift
-      this.nextGridTime += sixteenthDur;
-      this.currentStep = (this.currentStep + 1) % STEPS_PER_BAR;
+      this.nextGridTime += subDur;
+      this.currentStep = (safeStep + 1) % stepsPerBar;
     }
   }
 
@@ -239,15 +252,17 @@ export class MetronomeEngine {
     stepIndex: number,
     beatIndex: number,
     subIndex: number,
+    subdivisionsPerBeat: number,
     time: number,
     effectiveOffsetPercent: number,
     level: AccentLevel
   ): void {
-    // Always enqueue visual event so the 16th-note tracker stays smooth
+    // Always enqueue visual event so the beat tracker stays smooth
     this.visualQueue.push({
       stepIndex,
       beatIndex,
       subIndex,
+      subdivisionsPerBeat,
       scheduledTime: time,
       effectiveOffsetPercent,
       level,
@@ -322,7 +337,7 @@ export class MetronomeEngine {
   }
 
   /**
-   * Subdivision click (e, &, a): tight, dry percussive tick.
+   * Subdivision click (e, &, a / trip, let): tight, dry percussive tick.
    */
   private triggerSubdivisionClick(
     time: number,

@@ -5,11 +5,16 @@ import { FeelControl } from './components/FeelControl';
 import { PresetSelector } from './components/PresetSelector';
 import { SubdivisionGrid } from './components/SubdivisionGrid';
 import { TempoControls } from './components/TempoControls';
-import { cloneSubdivisions, PRESETS } from './data/presets';
+import {
+  cloneSubdivisions,
+  createDefaultSubdivisions,
+  PRESETS,
+} from './data/presets';
 import type {
   AccentLevel,
+  GridMode,
   GroovePreset,
-  SubdivisionTuple,
+  SubdivisionSlot,
 } from './types/metronome';
 
 const LEVEL_CYCLE: AccentLevel[] = ['mute', 'soft', 'normal', 'accent'];
@@ -20,10 +25,11 @@ export function App() {
   const [selectedPresetId, setSelectedPresetId] = useState<string>(
     INITIAL_PRESET.id
   );
+  const [gridMode, setGridMode] = useState<GridMode>(INITIAL_PRESET.gridMode);
   const [bpm, setBpm] = useState<number>(INITIAL_PRESET.suggestedBpm);
   const [feel, setFeel] = useState<number>(INITIAL_PRESET.defaultFeel);
-  const [subdivisions, setSubdivisions] = useState<SubdivisionTuple>(() =>
-    cloneSubdivisions(INITIAL_PRESET)
+  const [subdivisions, setSubdivisions] = useState<SubdivisionSlot[]>(() =>
+    cloneSubdivisions(INITIAL_PRESET.subdivisions)
   );
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [activeStep, setActiveStep] = useState<number | null>(null);
@@ -36,6 +42,7 @@ export function App() {
       engineRef.current = new MetronomeEngine({
         bpm,
         feel,
+        gridMode,
         subdivisions,
       });
     }
@@ -45,8 +52,8 @@ export function App() {
 
   // Push live parameter updates into the lookahead scheduler without interrupting playback
   useEffect(() => {
-    engineRef.current?.updateConfig({ bpm, feel, subdivisions });
-  }, [bpm, feel, subdivisions]);
+    engineRef.current?.updateConfig({ bpm, feel, gridMode, subdivisions });
+  }, [bpm, feel, gridMode, subdivisions]);
 
   // Clean up audio engine and animation loop on unmount
   useEffect(() => {
@@ -93,11 +100,11 @@ export function App() {
       setActiveStep(null);
     } else {
       // Unlock & start synchronously inside the user tap gesture for iOS Safari
-      engine.updateConfig({ bpm, feel, subdivisions });
+      engine.updateConfig({ bpm, feel, gridMode, subdivisions });
       engine.start();
       setIsPlaying(true);
     }
-  }, [bpm, feel, subdivisions, getEngine]);
+  }, [bpm, feel, gridMode, subdivisions, getEngine]);
 
   // Spacebar play/stop convenience on desktop
   useEffect(() => {
@@ -117,57 +124,69 @@ export function App() {
 
   const handleSelectPreset = (preset: GroovePreset) => {
     setSelectedPresetId(preset.id);
-    setSubdivisions(cloneSubdivisions(preset));
+    setGridMode(preset.gridMode);
+    setSubdivisions(cloneSubdivisions(preset.subdivisions));
     setFeel(preset.defaultFeel);
     setBpm(preset.suggestedBpm);
+    if (preset.gridMode !== gridMode) {
+      setActiveStep(null);
+    }
   };
 
   const handleResetPreset = () => {
     const preset =
       PRESETS.find((p) => p.id === selectedPresetId) ?? PRESETS[0];
-    setSubdivisions(cloneSubdivisions(preset));
+    setGridMode(preset.gridMode);
+    setSubdivisions(cloneSubdivisions(preset.subdivisions));
     setFeel(preset.defaultFeel);
+    if (preset.gridMode !== gridMode) {
+      setActiveStep(null);
+    }
+  };
+
+  const handleChangeGridMode = (nextMode: GridMode) => {
+    if (nextMode === gridMode) return;
+    setGridMode(nextMode);
+    setSubdivisions(createDefaultSubdivisions(nextMode));
+    setActiveStep(null);
   };
 
   const handleChangeOffset = (index: number, offsetPercent: number) => {
     const clamped = Math.max(-30, Math.min(30, Math.round(offsetPercent)));
-    setSubdivisions((prev) => {
-      const next = [
-        { ...prev[0] },
-        { ...prev[1] },
-        { ...prev[2] },
-        { ...prev[3] },
-      ] as SubdivisionTuple;
-      next[index].offsetPercent = clamped;
-      return next;
-    });
+    setSubdivisions((prev) =>
+      prev.map((slot, i) =>
+        i === index ? { ...slot, offsetPercent: clamped } : slot
+      )
+    );
   };
 
   const handleCycleLevel = (index: number) => {
-    setSubdivisions((prev) => {
-      const next = [
-        { ...prev[0] },
-        { ...prev[1] },
-        { ...prev[2] },
-        { ...prev[3] },
-      ] as SubdivisionTuple;
-      const currentIdx = LEVEL_CYCLE.indexOf(next[index].level);
-      next[index].level = LEVEL_CYCLE[(currentIdx + 1) % LEVEL_CYCLE.length];
-      return next;
-    });
+    setSubdivisions((prev) =>
+      prev.map((slot, i) => {
+        if (i !== index) return slot;
+        const currentIdx = LEVEL_CYCLE.indexOf(slot.level);
+        return {
+          ...slot,
+          level: LEVEL_CYCLE[(currentIdx + 1) % LEVEL_CYCLE.length],
+        };
+      })
+    );
   };
 
   const isModified = useMemo(() => {
     const preset = PRESETS.find((p) => p.id === selectedPresetId);
     if (!preset) return false;
+    if (preset.gridMode !== gridMode) return true;
+    if (preset.subdivisions.length !== subdivisions.length) return true;
     return preset.subdivisions.some(
       (slot, idx) =>
         slot.offsetPercent !== subdivisions[idx].offsetPercent ||
         slot.level !== subdivisions[idx].level
     );
-  }, [selectedPresetId, subdivisions]);
+  }, [selectedPresetId, gridMode, subdivisions]);
 
-  const activeSubIndex = activeStep !== null ? activeStep % 4 : -1;
+  const subsPerBeat = gridMode === 'triplet' ? 3 : 4;
+  const activeSubIndex = activeStep !== null ? activeStep % subsPerBeat : -1;
 
   return (
     <div className="app-shell">
@@ -175,7 +194,9 @@ export function App() {
         <div className="brand">
           <span className="brand-dot" aria-hidden="true" />
           <h1 className="brand-title">GROOVE</h1>
-          <span className="time-sig-badge">4/4</span>
+          <span className="time-sig-badge">
+            4/4 · {gridMode === 'triplet' ? 'TRIPLET' : '16TH'}
+          </span>
         </div>
         <span className="engine-badge">
           {isPlaying ? 'LOCKED · WEB AUDIO' : 'MICRO-TIMING'}
@@ -186,6 +207,7 @@ export function App() {
         <BeatVisualizer
           isPlaying={isPlaying}
           activeStep={activeStep}
+          gridMode={gridMode}
           subdivisions={subdivisions}
           feel={feel}
         />
@@ -203,11 +225,13 @@ export function App() {
         <FeelControl feel={feel} onChangeFeel={setFeel} />
 
         <SubdivisionGrid
+          gridMode={gridMode}
           subdivisions={subdivisions}
           feel={feel}
           bpm={bpm}
           isPlaying={isPlaying}
           activeSubIndex={activeSubIndex}
+          onChangeGridMode={handleChangeGridMode}
           onChangeOffset={handleChangeOffset}
           onCycleLevel={handleCycleLevel}
         />

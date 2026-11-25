@@ -1,11 +1,17 @@
-import type { AccentLevel, SubdivisionTuple } from '../types/metronome';
+import type {
+  AccentLevel,
+  GridMode,
+  SubdivisionSlot,
+} from '../types/metronome';
 
 interface SubdivisionGridProps {
-  subdivisions: SubdivisionTuple;
+  gridMode: GridMode;
+  subdivisions: SubdivisionSlot[];
   feel: number;
   bpm: number;
   isPlaying: boolean;
   activeSubIndex: number;
+  onChangeGridMode: (mode: GridMode) => void;
   onChangeOffset: (index: number, offsetPercent: number) => void;
   onCycleLevel: (index: number) => void;
 }
@@ -21,21 +27,57 @@ const LEVEL_META: Record<
 };
 
 export function SubdivisionGrid({
+  gridMode,
   subdivisions,
   feel,
   bpm,
   isPlaying,
   activeSubIndex,
+  onChangeGridMode,
   onChangeOffset,
   onCycleLevel,
 }: SubdivisionGridProps) {
-  const sixteenthMs = (60 / bpm / 4) * 1000;
+  const subsPerBeat = gridMode === 'triplet' ? 3 : 4;
+  const subMs = (60 / bpm / subsPerBeat) * 1000;
+  const stepSpanPct = 100 / subsPerBeat;
 
   return (
-    <section className="panel subdivisions-panel" aria-label="Micro-timing subdivisions">
-      <div className="section-header">
-        <span className="section-title">SUBDIVISIONS (1 · e · &amp; · a)</span>
-        <span className="section-hint">Tap level · Drag timing</span>
+    <section
+      className="panel subdivisions-panel"
+      aria-label="Micro-timing subdivisions"
+    >
+      <div className="subdivisions-header">
+        <div className="section-title-col">
+          <span className="section-title">SUBDIVISION GRID</span>
+          <span className="section-hint">
+            {gridMode === 'triplet'
+              ? 'Triplet grid (1 · trip · let)'
+              : '16th-note grid (1 · e · & · a)'}
+          </span>
+        </div>
+
+        <div
+          className="grid-mode-toggle"
+          role="group"
+          aria-label="Subdivision grid mode"
+        >
+          <button
+            type="button"
+            className={`grid-mode-btn ${gridMode === '16th' ? 'is-active' : ''}`}
+            aria-pressed={gridMode === '16th'}
+            onClick={() => onChangeGridMode('16th')}
+          >
+            16ths
+          </button>
+          <button
+            type="button"
+            className={`grid-mode-btn ${gridMode === 'triplet' ? 'is-active' : ''}`}
+            aria-pressed={gridMode === 'triplet'}
+            onClick={() => onChangeGridMode('triplet')}
+          >
+            Triplets
+          </button>
+        </div>
       </div>
 
       <div className="subdivision-list">
@@ -44,7 +86,11 @@ export function SubdivisionGrid({
           const isMuted = slot.level === 'mute';
           const isActive = isPlaying && activeSubIndex === index && !isMuted;
           const effectivePercent = slot.offsetPercent * (feel / 100);
-          const effectiveMs = Math.round((effectivePercent / 100) * sixteenthMs);
+          const effectiveMs = Math.round((effectivePercent / 100) * subMs);
+          const beatPosPct = Math.round(
+            index * stepSpanPct + (effectivePercent / 100) * stepSpanPct
+          );
+
           const formattedRaw =
             slot.offsetPercent > 0
               ? `+${slot.offsetPercent}%`
@@ -62,7 +108,9 @@ export function SubdivisionGrid({
               <div className="sub-row-top">
                 <div className="sub-identity">
                   <span
-                    className={`sub-badge ${isActive ? 'is-active' : ''} level-${slot.level}`}
+                    className={`sub-badge ${
+                      slot.label.length > 1 ? 'is-wide' : ''
+                    } ${isActive ? 'is-active' : ''} level-${slot.level}`}
                   >
                     {slot.label}
                   </span>
@@ -87,10 +135,12 @@ export function SubdivisionGrid({
                   className="offset-readout"
                   onClick={() => onChangeOffset(index, 0)}
                   title="Tap to reset offset to 0%"
-                  aria-label={`Offset ${formattedRaw} (${formattedMs}). Tap to reset to 0%`}
+                  aria-label={`Offset ${formattedRaw} (${formattedMs}, at ${beatPosPct}% of beat). Tap to reset to 0%`}
                 >
                   <span className="offset-pct">{formattedRaw}</span>
-                  <span className="offset-ms">{formattedMs}</span>
+                  <span className="offset-ms">
+                    {formattedMs} · @{beatPosPct}%
+                  </span>
                 </button>
               </div>
 
